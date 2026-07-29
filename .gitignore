@@ -1,0 +1,10 @@
+node_modules/
+dist/
+preview-dist/
+tests/output/
+tests/fixtures/bulk/
+public/pdf.worker.min.mjs
+.env
+.env.local
+.DS_Store
+*.log
