@@ -1,395 +1,232 @@
-/**
- * アプリのルートコンポーネント。
- *
- * 画面遷移を最小限にするため、一覧を中心に据えて
- * 各機能はシート（モーダル）で重ねる構成にしている。
- *   ①取り込み → ②並び替え → ③編集 → ④PDF設定 → ⑤作成 → ⑥保存・共有
- */
+import { useEffect, useMemo, useState } from 'react';
+import { PDFDocument } from 'pdf-lib';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { EmptyState } from './components/EmptyState';
-import { Lightbox } from './components/Lightbox';
-import { PageEditor } from './components/PageEditor';
-import { PageGrid } from './components/PageGrid';
-import { ProgressOverlay } from './components/ProgressOverlay';
-import { ResultSheet } from './components/ResultSheet';
-import { SettingsSheet } from './components/SettingsSheet';
-import { Toasts } from './components/Toasts';
-import { MenuItem, PopoverMenu } from './components/ui';
-import {
-  IconCheck,
-  IconDocument,
-  IconImages,
-  IconMoon,
-  IconMore,
-  IconPlus,
-  IconSettings,
-  IconSort,
-  IconSun,
-  IconText,
-  IconTrash,
-} from './components/icons';
-import { ACCEPT_ATTRIBUTE, MAX_PAGES, QUALITIES } from './constants';
-import { useJob } from './hooks/useJob';
-import { useTheme } from './hooks/useTheme';
-import { importFiles } from './lib/importFiles';
-import { runOcr } from './lib/ocr';
-import { resolveEnhance, sourceSize } from './lib/pageUtils';
-import { compressPdf } from './lib/pdf/compress';
-import { chunkRanges, parseRanges, splitPdf } from './lib/pdf/split';
-import { buildPdfViaWorker } from './lib/pipelineClient';
-import { downloadBlob, printPdf, shareFile } from './lib/share';
-import { releaseThumbnails } from './lib/thumbnails';
-import { createZip } from './lib/zip';
-import { formatBytes, sanitizeFileName } from './lib/util';
-import { useAppDispatch, useAppState } from './store/AppContext';
-import type { BuildPageSpec, PageItem, QualityId, SortKey } from './types';
-import { MARGINS, PAPER_SIZES } from './constants';
+type ImageItem = {
+  id: string;
+  file: File;
+  url: string;
+};
+
+const MAX_IMAGES = 100;
 
 export default function App() {
-  const state = useAppState();
-  const dispatch = useAppDispatch();
-  useTheme(state.theme);
-
-  const notify = useCallback(
-    (message: string, tone: 'info' | 'success' | 'error' = 'info') => {
-      dispatch({ type: 'toast/push', message, tone });
-    },
-    [dispatch],
-  );
-
-  const job = useJob((message) => notify(message, 'error'));
-
-  const photoInputRef = useRef<HTMLInputElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const cameraInputRef = useRef<HTMLInputElement>(null);
-
-  const [dragActive, setDragActive] = useState(false);
-  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
-  const [editorPageId, setEditorPageId] = useState<string | null>(null);
-  const [showSettings, setShowSettings] = useState(false);
-  const [showResult, setShowResult] = useState(false);
-  const [sortMenuOpen, setSortMenuOpen] = useState(false);
-  const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
-
-  const editorPage = state.pages.find((page) => page.id === editorPageId) ?? null;
-  const editorIndex = state.pages.findIndex((page) => page.id === editorPageId);
-  const hasOcr = state.pages.some((page) => page.ocr);
-
-  const handleFiles = useCallback(
-    async (files: File[]) => {
-      if (files.length === 0) return;
-      const remaining = MAX_PAGES - state.pages.length;
-      if (remaining <= 0) {
-        notify(`ページ数が上限（${MAX_PAGES}枚）に達しています`, 'error');
-        return;
-      }
-
-      await job.run('画像を読み込み中', async (signal, update) => {
-        const result = await importFiles(files, {
-          remaining,
-          quality: state.settings.quality,
-          signal,
-          onProgress: ({ done, total, label }) => {
-            update({ ratio: total > 0 ? done / total : null, detail: label });
-          },
-        });
-
-        if (result.pages.length > 0) dispatch({ type: 'pages/add', pages: result.pages });
-        if (result.skippedByLimit > 0) notify(`上限のため ${result.skippedByLimit} 件は追加できませんでした`, 'error');
-        for (const error of result.errors.slice(0, 3)) notify(`${error.name}: ${error.reason}`, 'error');
-        if (result.pages.length > 0) notify(`${result.pages.length} ページを追加しました`, 'success');
-        return result;
-      });
-    },
-    [dispatch, job, notify, state.pages.length, state.settings.quality],
-  );
-
-  const onInputChange = useCallback(
-    (event: React.ChangeEvent<HTMLInputElement>) => {
-      const files = Array.from(event.target.files ?? []);
-      event.target.value = '';
-      void handleFiles(files);
-    },
-    [handleFiles],
-  );
+  const [images, setImages] = useState<ImageItem[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
 
   useEffect(() => {
-    let depth = 0;
-    const onDragEnter = (event: DragEvent) => {
-      if (!event.dataTransfer?.types.includes('Files')) return;
-      depth += 1;
-      setDragActive(true);
-    };
-    const onDragOver = (event: DragEvent) => {
-      if (!event.dataTransfer?.types.includes('Files')) return;
-      event.preventDefault();
-      event.dataTransfer.dropEffect = 'copy';
-    };
-    const onDragLeave = () => {
-      depth = Math.max(0, depth - 1);
-      if (depth === 0) setDragActive(false);
-    };
-    const onDrop = (event: DragEvent) => {
-      if (!event.dataTransfer?.files?.length) return;
-      event.preventDefault();
-      depth = 0;
-      setDragActive(false);
-      void handleFiles(Array.from(event.dataTransfer.files));
-    };
+    return () => images.forEach((item) => URL.revokeObjectURL(item.url));
+  }, [images]);
 
-    window.addEventListener('dragenter', onDragEnter);
-    window.addEventListener('dragover', onDragOver);
-    window.addEventListener('dragleave', onDragLeave);
-    window.addEventListener('drop', onDrop);
-    return () => {
-      window.removeEventListener('dragenter', onDragEnter);
-      window.removeEventListener('dragover', onDragOver);
-      window.removeEventListener('dragleave', onDragLeave);
-      window.removeEventListener('drop', onDrop);
-    };
-  }, [handleFiles]);
-
-  useEffect(() => {
-    if (state.pages.length === 0) return;
-    const onBeforeUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = '';
-    };
-    window.addEventListener('beforeunload', onBeforeUnload);
-    return () => window.removeEventListener('beforeunload', onBeforeUnload);
-  }, [state.pages.length]);
-
-  const handleDelete = useCallback(
-    (id: string) => {
-      releaseThumbnails(id);
-      dispatch({ type: 'pages/remove', ids: [id] });
-    },
-    [dispatch],
+  const totalSize = useMemo(
+    () => images.reduce((sum, item) => sum + item.file.size, 0),
+    [images],
   );
 
-  const handleDeleteSelected = useCallback(() => {
-    if (state.selectedIds.length === 0) return;
-    for (const id of state.selectedIds) releaseThumbnails(id);
-    dispatch({ type: 'pages/remove', ids: state.selectedIds });
-    notify(`${state.selectedIds.length} ページを削除しました`, 'success');
-  }, [dispatch, notify, state.selectedIds]);
+  const addFiles = (files: FileList | null) => {
+    if (!files) return;
+    const remaining = MAX_IMAGES - images.length;
+    const accepted = Array.from(files)
+      .filter((file) => file.type.startsWith('image/'))
+      .slice(0, Math.max(0, remaining));
 
-  const handleSort = useCallback(
-    (key: SortKey) => {
-      const direction = state.sort.key === key && state.sort.direction === 'asc' ? 'desc' : 'asc';
-      dispatch({ type: 'pages/sort', key, direction });
-      setSortMenuOpen(false);
-      const labels: Record<SortKey, string> = { name: '名前順', lastModified: '更新日時順', capturedAt: '撮影日時順' };
-      notify(`${labels[key]}（${direction === 'asc' ? '昇順' : '降順'}）に並び替えました`);
-    },
-    [dispatch, notify, state.sort],
-  );
-
-  const handleOcr = useCallback(
-    async (targets: PageItem[]) => {
-      if (targets.length === 0) {
-        notify('OCR するページがありません');
-        return;
-      }
-      await job.run('文字を認識中', async (signal, update) => {
-        let index = 0;
-        for (const page of targets) {
-          if (signal.aborted) break;
-          update({ ratio: index / targets.length, detail: `${index + 1} / ${targets.length} ページ` });
-          const ocr = await runOcr(page, {
-            signal,
-            defaultEnhance: state.enhanceDefaults,
-            autoEnhanceEnabled: state.autoEnhanceEnabled,
-            onProgress: (ratio) => update({ ratio: (index + ratio) / targets.length }),
-          });
-          dispatch({ type: 'pages/setOcr', id: page.id, ocr });
-          index += 1;
-        }
-        if (!signal.aborted) {
-          dispatch({ type: 'settings/patch', patch: { searchableText: true } });
-          notify(`${index} ページの文字を認識しました`, 'success');
-        }
-        return index;
-      });
-    },
-    [dispatch, job, notify, state.autoEnhanceEnabled, state.enhanceDefaults],
-  );
-
-  const buildSpecs = useCallback((): BuildPageSpec[] => {
-    const preset = QUALITIES.find((q) => q.id === state.settings.quality) ?? QUALITIES[1];
-    return state.pages.map((page) => {
-      const size = sourceSize(page);
-      const spec: BuildPageSpec = {
-        id: page.id,
-        blob: page.blob,
-        rotation: page.rotation,
-        enhance: resolveEnhance(page, state.enhanceDefaults, state.autoEnhanceEnabled),
-        maxEdge: preset?.maxEdge ?? 2339,
-        jpegQuality: preset?.jpegQuality ?? 0.82,
-        sourceWidth: size.width,
-        sourceHeight: size.height,
-      };
-      if (page.crop) spec.crop = page.crop;
-      if (state.settings.searchableText && page.ocr) spec.ocr = page.ocr;
-      return spec;
-    });
-  }, [state.autoEnhanceEnabled, state.enhanceDefaults, state.pages, state.settings]);
-
-  const handleCreatePdf = useCallback(async () => {
-    if (state.pages.length === 0) return;
-    const fileName = `${sanitizeFileName(state.settings.fileName || 'scan')}.pdf`;
-
-    const built = await job.run('PDF を作成中', async (signal, update) => {
-      const result = await buildPdfViaWorker(
-        { pages: buildSpecs(), settings: state.settings },
-        { signal, onProgress: (done, total, label) => update({ ratio: total > 0 ? done / total : null, detail: `${Math.min(done, total)} / ${total} — ${label}` }) },
-      );
-      const blob = new Blob([result.bytes], { type: 'application/pdf' });
-      return { blob, fileName, pageCount: result.pageCount, size: blob.size };
-    });
-
-    if (built) {
-      dispatch({ type: 'result/set', result: built });
-      setShowResult(true);
-      notify(`PDF を作成しました（${formatBytes(built.size)}）`, 'success');
+    if (accepted.length === 0) {
+      setMessage(remaining <= 0 ? '画像は最大100枚までです。' : '画像ファイルを選択してください。');
+      return;
     }
-  }, [buildSpecs, dispatch, job, notify, state.pages.length, state.settings]);
 
-  const result = state.result;
-  const pageCountText = `${state.pages.length} / ${MAX_PAGES}`;
-  const allSelected = state.pages.length > 0 && state.selectedIds.length === state.pages.length;
-  const selectedTargets = useMemo(() => state.pages.filter((page) => state.selectedIds.includes(page.id)), [state.pages, state.selectedIds]);
+    setImages((current) => [
+      ...current,
+      ...accepted.map((file) => ({
+        id: crypto.randomUUID(),
+        file,
+        url: URL.createObjectURL(file),
+      })),
+    ]);
+    setMessage(
+      accepted.length < files.length
+        ? `追加できる上限まで取り込みました（最大${MAX_IMAGES}枚）。`
+        : '',
+    );
+  };
+
+  const remove = (id: string) => {
+    setImages((current) => {
+      const target = current.find((item) => item.id === id);
+      if (target) URL.revokeObjectURL(target.url);
+      return current.filter((item) => item.id !== id);
+    });
+  };
+
+  const move = (index: number, direction: -1 | 1) => {
+    const nextIndex = index + direction;
+    if (nextIndex < 0 || nextIndex >= images.length) return;
+    setImages((current) => {
+      const copy = [...current];
+      [copy[index], copy[nextIndex]] = [copy[nextIndex], copy[index]];
+      return copy;
+    });
+  };
+
+  const clearAll = () => {
+    images.forEach((item) => URL.revokeObjectURL(item.url));
+    setImages([]);
+    setMessage('');
+  };
+
+  const createPdf = async () => {
+    if (images.length === 0 || busy) return;
+    setBusy(true);
+    setMessage('PDFを作成しています…');
+
+    try {
+      const pdf = await PDFDocument.create();
+
+      for (const item of images) {
+        const bytes = new Uint8Array(await item.file.arrayBuffer());
+        let embedded;
+
+        if (item.file.type === 'image/png') {
+          embedded = await pdf.embedPng(bytes);
+        } else if (item.file.type === 'image/jpeg' || item.file.type === 'image/jpg') {
+          embedded = await pdf.embedJpg(bytes);
+        } else {
+          const converted = await convertToJpeg(item.file);
+          embedded = await pdf.embedJpg(converted);
+        }
+
+        const { width, height } = embedded.scale(1);
+        const page = pdf.addPage([width, height]);
+        page.drawImage(embedded, { x: 0, y: 0, width, height });
+      }
+
+      const output = await pdf.save();
+      const blob = new Blob([output], { type: 'application/pdf' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `SnapPDF_${new Date().toISOString().slice(0, 10)}.pdf`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      setMessage(`${images.length}枚の画像をPDFにまとめました。`);
+    } catch (error) {
+      console.error(error);
+      setMessage('PDFの作成に失敗しました。JPEGまたはPNG画像で再度お試しください。');
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
-    <div className="app-shell">
-      <header className="app-header">
+    <div style={styles.page}>
+      <header style={styles.header}>
         <div>
-          <h1>SnapPDF</h1>
-          <p>画像をまとめてPDFに</p>
+          <h1 style={styles.title}>SnapPDF</h1>
+          <p style={styles.subtitle}>複数の画像を、1つのPDFにまとめます</p>
         </div>
-        <div className="header-actions">
-          <button className="icon-button" type="button" onClick={() => dispatch({ type: 'theme/toggle' })} aria-label="テーマを切り替え">
-            {state.theme === 'dark' ? <IconSun /> : <IconMoon />}
-          </button>
-          <button className="icon-button" type="button" onClick={() => setToolsMenuOpen((value) => !value)} aria-label="メニュー">
-            <IconMore />
-          </button>
-          <PopoverMenu open={toolsMenuOpen} onClose={() => setToolsMenuOpen(false)} align="right">
-            <MenuItem icon={<IconText />} onClick={() => { setToolsMenuOpen(false); void handleOcr(selectedTargets.length > 0 ? selectedTargets : state.pages); }}>
-              {selectedTargets.length > 0 ? '選択ページをOCR' : '全ページをOCR'}
-            </MenuItem>
-            <MenuItem icon={<IconSettings />} onClick={() => { setToolsMenuOpen(false); setShowSettings(true); }}>PDF設定</MenuItem>
-          </PopoverMenu>
-        </div>
+        <span style={styles.counter}>{images.length} / {MAX_IMAGES}枚</span>
       </header>
 
-      <main>
-        {state.pages.length === 0 ? (
-          <EmptyState
-            dragActive={dragActive}
-            onSelectPhotos={() => photoInputRef.current?.click()}
-            onTakePhoto={() => cameraInputRef.current?.click()}
-            onSelectFiles={() => fileInputRef.current?.click()}
+      <main style={styles.main}>
+        <label style={styles.dropZone}>
+          <strong style={{ fontSize: 18 }}>画像を選択</strong>
+          <span style={styles.hint}>JPEG・PNGなど／最大100枚</span>
+          <input
+            type="file"
+            accept="image/*"
+            multiple
+            onChange={(event) => {
+              addFiles(event.target.files);
+              event.currentTarget.value = '';
+            }}
+            style={{ display: 'none' }}
           />
-        ) : (
+        </label>
+
+        {message && <div style={styles.message}>{message}</div>}
+
+        {images.length > 0 && (
           <>
-            <section className="toolbar-card">
-              <div className="toolbar-card__summary">
-                <IconImages />
-                <div><strong>{pageCountText}</strong><span>ページ</span></div>
-              </div>
-              <div className="toolbar-card__actions">
-                <button className="button button--ghost" type="button" onClick={() => photoInputRef.current?.click()}><IconPlus />追加</button>
-                <button className="button button--ghost" type="button" onClick={() => setSortMenuOpen((value) => !value)}><IconSort />並び替え</button>
-                <PopoverMenu open={sortMenuOpen} onClose={() => setSortMenuOpen(false)} align="right">
-                  <MenuItem onClick={() => handleSort('name')}>名前順</MenuItem>
-                  <MenuItem onClick={() => handleSort('lastModified')}>更新日時順</MenuItem>
-                  <MenuItem onClick={() => handleSort('capturedAt')}>撮影日時順</MenuItem>
-                  <MenuItem onClick={() => { dispatch({ type: 'pages/reverse' }); setSortMenuOpen(false); }}>逆順</MenuItem>
-                </PopoverMenu>
-              </div>
-            </section>
+            <div style={styles.summary}>
+              <span>合計 {formatBytes(totalSize)}</span>
+              <button type="button" onClick={clearAll} style={styles.textButton}>すべて削除</button>
+            </div>
 
-            <section className="selection-bar">
-              <button className="text-button" type="button" onClick={() => dispatch({ type: allSelected ? 'selection/clear' : 'selection/all' })}>
-                <IconCheck />{allSelected ? '選択解除' : 'すべて選択'}
-              </button>
-              {state.selectedIds.length > 0 && (
-                <button className="text-button text-button--danger" type="button" onClick={handleDeleteSelected}><IconTrash />{state.selectedIds.length}件を削除</button>
-              )}
-            </section>
-
-            <PageGrid
-              pages={state.pages}
-              selectedIds={state.selectedIds}
-              onToggleSelect={(id) => dispatch({ type: 'selection/toggle', id })}
-              onOpen={(index) => setLightboxIndex(index)}
-              onEdit={(id) => setEditorPageId(id)}
-              onDelete={handleDelete}
-              onReorder={(from, to) => dispatch({ type: 'pages/reorder', from, to })}
-            />
+            <div style={styles.grid}>
+              {images.map((item, index) => (
+                <article key={item.id} style={styles.card}>
+                  <img src={item.url} alt={item.file.name} style={styles.image} />
+                  <div style={styles.cardBody}>
+                    <strong style={styles.fileName}>{index + 1}. {item.file.name}</strong>
+                    <span style={styles.fileSize}>{formatBytes(item.file.size)}</span>
+                    <div style={styles.actions}>
+                      <button type="button" onClick={() => move(index, -1)} disabled={index === 0} style={styles.smallButton}>←</button>
+                      <button type="button" onClick={() => move(index, 1)} disabled={index === images.length - 1} style={styles.smallButton}>→</button>
+                      <button type="button" onClick={() => remove(item.id)} style={styles.deleteButton}>削除</button>
+                    </div>
+                  </div>
+                </article>
+              ))}
+            </div>
           </>
         )}
       </main>
 
-      {state.pages.length > 0 && (
-        <footer className="bottom-bar">
-          <button className="button button--secondary" type="button" onClick={() => setShowSettings(true)}><IconSettings />設定</button>
-          <button className="button button--primary" type="button" onClick={() => void handleCreatePdf()}><IconDocument />PDFを作成</button>
+      {images.length > 0 && (
+        <footer style={styles.footer}>
+          <button type="button" onClick={createPdf} disabled={busy} style={styles.primaryButton}>
+            {busy ? '作成中…' : `${images.length}枚をPDFにする`}
+          </button>
         </footer>
       )}
-
-      <input ref={photoInputRef} type="file" accept="image/*" multiple hidden onChange={onInputChange} />
-      <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" hidden onChange={onInputChange} />
-      <input ref={fileInputRef} type="file" accept={ACCEPT_ATTRIBUTE} multiple hidden onChange={onInputChange} />
-
-      {lightboxIndex !== null && (
-        <Lightbox pages={state.pages} initialIndex={lightboxIndex} onClose={() => setLightboxIndex(null)} onEdit={(id) => { setLightboxIndex(null); setEditorPageId(id); }} />
-      )}
-
-      {editorPage && (
-        <PageEditor
-          page={editorPage}
-          pageNumber={editorIndex + 1}
-          defaults={state.enhanceDefaults}
-          autoEnhanceEnabled={state.autoEnhanceEnabled}
-          onClose={() => setEditorPageId(null)}
-          onPatch={(patch) => dispatch({ type: 'pages/patch', id: editorPage.id, patch })}
-          onDuplicate={() => dispatch({ type: 'pages/duplicate', id: editorPage.id })}
-          onDelete={() => { handleDelete(editorPage.id); setEditorPageId(null); }}
-        />
-      )}
-
-      {showSettings && <SettingsSheet settings={state.settings} defaults={state.enhanceDefaults} autoEnhanceEnabled={state.autoEnhanceEnabled} hasOcr={hasOcr} onClose={() => setShowSettings(false)} onSettingsPatch={(patch) => dispatch({ type: 'settings/patch', patch })} onDefaultsPatch={(patch) => dispatch({ type: 'enhance/patch', patch })} onAutoEnhanceChange={(enabled) => dispatch({ type: 'enhance/toggle', enabled })} />}
-
-      {showResult && result && (
-        <ResultSheet
-          result={result}
-          onClose={() => setShowResult(false)}
-          onDownload={() => downloadBlob(result.blob, result.fileName)}
-          onShare={() => void shareFile(result.blob, result.fileName)}
-          onPrint={() => printPdf(result.blob)}
-          onCompress={async (quality: QualityId) => {
-            const compressed = await job.run('PDFを圧縮中', async (signal, update) => compressPdf(result.blob, quality, { signal, onProgress: (done, total) => update({ ratio: total ? done / total : null, detail: `${done} / ${total}` }) }));
-            if (compressed) {
-              const next = { ...result, blob: compressed, size: compressed.size, fileName: result.fileName.replace(/\.pdf$/i, '_compressed.pdf') };
-              dispatch({ type: 'result/set', result: next });
-              notify(`圧縮しました（${formatBytes(compressed.size)}）`, 'success');
-            }
-          }}
-          onSplit={async (mode, value) => {
-            const bytes = await result.blob.arrayBuffer();
-            const ranges = mode === 'range' ? parseRanges(value, result.pageCount) : mode === 'every' ? chunkRanges(result.pageCount, Number(value) || 1) : chunkRanges(result.pageCount, 1);
-            const parts = await splitPdf(bytes, ranges, result.fileName.replace(/\.pdf$/i, ''));
-            if (parts.length === 1 && parts[0]) downloadBlob(new Blob([parts[0].bytes], { type: 'application/pdf' }), parts[0].name);
-            else if (parts.length > 1) downloadBlob(await createZip(parts.map((part) => ({ name: part.name, data: part.bytes }))), `${result.fileName.replace(/\.pdf$/i, '')}_split.zip`);
-          }}
-        />
-      )}
-
-      {job.state && <ProgressOverlay state={job.state} onCancel={job.cancel} />}
-      <Toasts toasts={state.toasts} onDismiss={(id) => dispatch({ type: 'toast/remove', id })} />
     </div>
   );
 }
+
+async function convertToJpeg(file: File): Promise<Uint8Array> {
+  const bitmap = await createImageBitmap(file);
+  const canvas = document.createElement('canvas');
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('Canvas is not available');
+  context.drawImage(bitmap, 0, 0);
+  bitmap.close();
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((result) => result ? resolve(result) : reject(new Error('Image conversion failed')), 'image/jpeg', 0.92);
+  });
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
+function formatBytes(value: number) {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+const styles: Record<string, React.CSSProperties> = {
+  page: { minHeight: '100vh', background: '#f5f7fb', color: '#172033', fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', paddingBottom: 110 },
+  header: { position: 'sticky', top: 0, zIndex: 5, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16, padding: '16px max(16px, env(safe-area-inset-left))', background: 'rgba(255,255,255,.94)', borderBottom: '1px solid #e4e8f0', backdropFilter: 'blur(12px)' },
+  title: { margin: 0, fontSize: 24 },
+  subtitle: { margin: '3px 0 0', color: '#667085', fontSize: 13 },
+  counter: { background: '#eaf0ff', color: '#2457d6', borderRadius: 999, padding: '7px 11px', fontWeight: 700, whiteSpace: 'nowrap' },
+  main: { width: 'min(1000px, calc(100% - 32px))', margin: '24px auto' },
+  dropZone: { display: 'grid', placeItems: 'center', gap: 8, minHeight: 150, padding: 24, background: '#fff', border: '2px dashed #9fb6ef', borderRadius: 18, cursor: 'pointer', textAlign: 'center' },
+  hint: { color: '#667085', fontSize: 14 },
+  message: { marginTop: 14, padding: 12, background: '#fff7d6', border: '1px solid #f4d86c', borderRadius: 10 },
+  summary: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '22px 2px 12px', color: '#667085' },
+  textButton: { border: 0, background: 'transparent', color: '#d92d20', fontWeight: 700, cursor: 'pointer' },
+  grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 14 },
+  card: { overflow: 'hidden', background: '#fff', border: '1px solid #e4e8f0', borderRadius: 14, boxShadow: '0 5px 18px rgba(16,24,40,.06)' },
+  image: { display: 'block', width: '100%', height: 160, objectFit: 'cover', background: '#eef1f6' },
+  cardBody: { display: 'grid', gap: 7, padding: 11 },
+  fileName: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13 },
+  fileSize: { color: '#667085', fontSize: 12 },
+  actions: { display: 'flex', gap: 7, marginTop: 3 },
+  smallButton: { flex: 1, padding: '7px 8px', border: '1px solid #d0d5dd', borderRadius: 8, background: '#fff', cursor: 'pointer' },
+  deleteButton: { flex: 2, padding: '7px 8px', border: '1px solid #f2b8b5', borderRadius: 8, background: '#fff5f4', color: '#b42318', cursor: 'pointer' },
+  footer: { position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 10, padding: '12px max(16px, env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom))', background: 'rgba(255,255,255,.96)', borderTop: '1px solid #e4e8f0', backdropFilter: 'blur(12px)' },
+  primaryButton: { display: 'block', width: 'min(600px, 100%)', margin: '0 auto', padding: 15, border: 0, borderRadius: 12, background: '#2f6df6', color: '#fff', fontSize: 17, fontWeight: 800, cursor: 'pointer' },
+};
