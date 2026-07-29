@@ -101,7 +101,11 @@ export default function App() {
       }
 
       const output = await pdf.save();
-      const blob = new Blob([output], { type: 'application/pdf' });
+      const pdfBuffer = output.buffer.slice(
+        output.byteOffset,
+        output.byteOffset + output.byteLength,
+      ) as ArrayBuffer;
+      const blob = new Blob([pdfBuffer], { type: 'application/pdf' });
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
       anchor.href = url;
