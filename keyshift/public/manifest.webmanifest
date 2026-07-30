@@ -1,0 +1,20 @@
+{
+  "name": "KeyShift — カラオケ練習プレイヤー",
+  "short_name": "KeyShift",
+  "description": "端末内の音楽ファイルのキーとテンポを変えて練習できるプレイヤー",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#08080b",
+  "theme_color": "#08080b",
+  "lang": "ja",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
