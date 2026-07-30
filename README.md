@@ -29,4 +29,11 @@ npm run build
 
 ## 同梱アプリ
 
-- [`keyshift/`](./keyshift) — **KeyShift**（カラオケ練習プレイヤー）。端末内の音楽ファイルを、テンポを変えずに半音単位でキー変更して再生できます。SnapPDFとは独立したNext.jsアプリで、`keyshift/` 内で `npm install && npm run dev` を実行してください。
+- [`keyshift/`](./keyshift) — **KeyShift**（カラオケ練習プレイヤー）。端末内の音楽ファイルを、テンポを変えずに半音単位でキー変更して再生できます。SnapPDFとは独立したNext.jsアプリです。
+
+`main`へのpush時に、SnapPDFはこれまでどおりPagesのルートへ、KeyShiftは`/keyshift/`配下へ同時にデプロイされます。
+
+| アプリ | 公開先 |
+|---|---|
+| SnapPDF | `https://<ユーザー名>.github.io/snappdf/` |
+| KeyShift | `https://<ユーザー名>.github.io/snappdf/keyshift/` |

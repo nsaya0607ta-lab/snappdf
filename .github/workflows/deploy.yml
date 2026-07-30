@@ -24,12 +24,43 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      # 公開URLの基準パスを先に確定させる。
+      # KeyShift はサブパス配信になるため、ビルド前にこの値が必要。
+      - name: Setup Pages
+        id: pages
+        uses: actions/configure-pages@v5
+      - name: Resolve KeyShift base path
+        id: keyshift-path
+        run: |
+          base='${{ steps.pages.outputs.base_path }}'
+          base="${base%/}"
+          echo "value=${base}/keyshift" >> "$GITHUB_OUTPUT"
+
+      # SnapPDF（リポジトリ直下）
       - name: Install dependencies
         run: npm install
       - name: Build
         run: npm run build
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
+
+      # KeyShift（keyshift/ 配下、/keyshift へ配信）
+      - name: Install KeyShift dependencies
+        working-directory: keyshift
+        run: npm ci
+      - name: Test KeyShift
+        working-directory: keyshift
+        run: npm test
+      - name: Build KeyShift
+        working-directory: keyshift
+        env:
+          NEXT_PUBLIC_BASE_PATH: ${{ steps.keyshift-path.outputs.value }}
+        run: npm run build
+      - name: Merge KeyShift into the Pages output
+        run: |
+          mkdir -p dist/keyshift
+          cp -r keyshift/out/. dist/keyshift/
+          touch dist/.nojekyll
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:

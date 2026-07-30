@@ -22,6 +22,15 @@ npx serve out
 
 `out/` はそのままどこにでも置けます。1度開けば Service Worker により**通信なしでも起動**します。
 
+サブディレクトリ配信（GitHub Pages など）の場合は、基準パスをビルド時に渡します:
+
+```bash
+NEXT_PUBLIC_BASE_PATH=/snappdf/keyshift npm run build
+```
+
+このリポジトリでは `main` への push で GitHub Actions が SnapPDF と一緒にビルドし、
+`https://<ユーザー名>.github.io/snappdf/keyshift/` へ配信します。
+
 テスト:
 
 ```bash
