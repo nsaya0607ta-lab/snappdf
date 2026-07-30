@@ -1,0 +1,29 @@
+{
+  "name": "keyshift",
+  "version": "1.0.0",
+  "private": true,
+  "description": "カラオケ練習に特化した、ローカル完結の楽曲キー変更プレイヤー",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "test:dsp": "node tests/dsp.test.mjs",
+    "test": "npm run typecheck && npm run test:dsp"
+  },
+  "dependencies": {
+    "next": "^16.2.12",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/node": "^26.1.2",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "postcss": "^8.5.25",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.3"
+  }
+}

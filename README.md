@@ -24,3 +24,9 @@ npm run build
 ```
 
 `main`ブランチへpushすると、GitHub ActionsからGitHub Pagesへ自動デプロイされます。
+
+---
+
+## 同梱アプリ
+
+- [`keyshift/`](./keyshift) — **KeyShift**（カラオケ練習プレイヤー）。端末内の音楽ファイルを、テンポを変えずに半音単位でキー変更して再生できます。SnapPDFとは独立したNext.jsアプリで、`keyshift/` 内で `npm install && npm run dev` を実行してください。
